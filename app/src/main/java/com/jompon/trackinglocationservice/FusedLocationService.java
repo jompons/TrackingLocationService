@@ -18,15 +18,21 @@ import android.os.SystemClock;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.support.v4.content.ContextCompat;
+import android.support.v4.content.LocalBroadcastManager;
 import android.util.Log;
 import android.widget.Toast;
 
+import com.google.android.gms.common.api.ApiException;
 import com.google.android.gms.location.FusedLocationProviderClient;
 import com.google.android.gms.location.LocationAvailability;
 import com.google.android.gms.location.LocationCallback;
 import com.google.android.gms.location.LocationRequest;
 import com.google.android.gms.location.LocationResult;
 import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.LocationSettingsRequest;
+import com.google.android.gms.location.LocationSettingsResponse;
+import com.google.android.gms.location.LocationSettingsStatusCodes;
+import com.google.android.gms.location.SettingsClient;
 import com.google.android.gms.tasks.OnFailureListener;
 import com.google.android.gms.tasks.OnSuccessListener;
 
@@ -34,12 +40,15 @@ public class FusedLocationService extends Service {
 
     public static final String START_ACTION = "START_ACTION";
     public static final String STOP_ACTION = "STOP_ACTION";
-    public static final String FILTER_ACTION = "FILTER_ACTION";
+    public static final String LOCATION_SERVICE_FILTER = "LOCATION_SERVICE_FILTER";
+    public static final String KEY_RESOLVABLE_API_EXCEPTION = "KEY_RESOLVABLE_API_EXCEPTION";
     public static final String KEY_LOCATION = "KEY_LOCATION";
     private static String TAG = FusedLocationService.class.getSimpleName();
     private static int LOCATION_INTERVAL = 60000;
     private static int LOCATION_FAST_INTERVAL = 30000;
     private static float LOCATION_DISTANCE = 0f;
+    private SettingsClient mSettingsClient;
+    private LocationSettingsRequest mLocationSettingsRequest;
     private FusedLocationProviderClient client;
     private LocationRequest mLocationRequest;
     private LocationCallback mLocationCallback;
@@ -123,9 +132,21 @@ public class FusedLocationService extends Service {
         Log.d(TAG, msg);
 
         Intent intent = new Intent();
-        intent.setAction(FILTER_ACTION);
+        intent.setAction(LOCATION_SERVICE_FILTER);
         intent.putExtra(KEY_LOCATION, location);
         sendBroadcast(intent);
+    }
+
+    private void initInstant( )
+    {
+        mSettingsClient = LocationServices.getSettingsClient(this);
+        client = LocationServices.getFusedLocationProviderClient(this);
+    }
+
+    private void buildLocationSettingsRequest() {
+        LocationSettingsRequest.Builder builder = new LocationSettingsRequest.Builder();
+        builder.addLocationRequest(mLocationRequest);
+        mLocationSettingsRequest = builder.build();
     }
 
     private void createLocationRequest() {
@@ -136,11 +157,7 @@ public class FusedLocationService extends Service {
         mLocationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
     }
 
-    private void create()
-    {
-        Log.d(TAG, "create");
-        createLocationRequest();
-        client = LocationServices.getFusedLocationProviderClient(this);
+    private void createLocationCallback() {
         mLocationCallback = new LocationCallback(){
 
             @Override
@@ -155,6 +172,51 @@ public class FusedLocationService extends Service {
                 super.onLocationAvailability(locationAvailability);
             }
         };
+    }
+
+    private void create()
+    {
+        Log.d(TAG, "create");
+        initInstant();
+        createLocationCallback();
+        createLocationRequest();
+        buildLocationSettingsRequest();
+        mSettingsClient.checkLocationSettings(mLocationSettingsRequest)
+                .addOnSuccessListener(new OnSuccessListener<LocationSettingsResponse>() {
+                    @Override
+                    public void onSuccess(LocationSettingsResponse locationSettingsResponse) {
+
+                        startLocationUpdates();
+                    }
+                })
+                .addOnFailureListener(new OnFailureListener() {
+                    @Override
+                    public void onFailure(@NonNull Exception e) {
+
+                        int statusCode = ((ApiException) e).getStatusCode();
+                        switch (statusCode) {
+                            case LocationSettingsStatusCodes.RESOLUTION_REQUIRED:
+                                Log.i(TAG, "Location settings are not satisfied. Attempting to upgrade " +
+                                        "location settings ");
+
+                                Intent intent = new Intent();
+                                intent.setAction(LOCATION_SERVICE_FILTER);
+                                intent.putExtra(KEY_RESOLVABLE_API_EXCEPTION, e);
+                                LocalBroadcastManager.getInstance(getApplicationContext()).sendBroadcast(intent);
+                                break;
+                            case LocationSettingsStatusCodes.SETTINGS_CHANGE_UNAVAILABLE:
+                                String errorMessage = "Location settings are inadequate, and cannot be " + "fixed here. Fix in Settings.";
+                                Log.e(TAG, errorMessage);
+                                Toast.makeText(getApplicationContext(), errorMessage, Toast.LENGTH_LONG).show();
+                                break;
+                        }
+                        stopSelf();
+                    }
+                });
+    }
+
+    private void startLocationUpdates( )
+    {
         if( ContextCompat.checkSelfPermission(getApplicationContext(), Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ) {
             client.getLastLocation()
                     .addOnSuccessListener(new OnSuccessListener<Location>() {
